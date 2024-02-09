@@ -1,9 +1,18 @@
 {
     "subscribes":[
         {
-            "url": "URL",
-            "tag": "tag_1",
+            "url": "https://sing-box-mock.photon.wdk.dn.ua/secret",
+            "tag": "tag_3",
             "enabled": true,
+            "emoji": 1,
+            "subgroup": "",
+            "prefix": "",
+            "User-Agent":"v2rayng"
+        },
+        {
+            "url": "https://getafreenode.com/subscribe/?uuid=EAF8DAF3-9924-4EFD-B8EA-E82D5A4CEDB9",
+            "tag": "tag_1",
+            "enabled": false,
             "emoji": 1,
             "subgroup": "",
             "prefix": "",

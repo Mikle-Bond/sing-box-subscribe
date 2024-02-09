@@ -184,15 +184,9 @@ def readFile(path):
 
 def noblankLine(data):
     lines = data.splitlines()
-    newdata = ''
-    for index in range(len(lines)):
-        line = lines[index]
-        t = line.strip()
-        if len(t)>0:
-            newdata += t
-            if index+1<len(lines):
-                newdata += '\n'
-    return newdata
+    clean_lines = map(str.strip, lines)
+    nonempty_lines = filter(lambda _:_, clean_lines)
+    return '\n'.join(nonempty_lines)
 
 def firstLine(data):
     lines = data.splitlines()
@@ -295,11 +289,10 @@ def getResponse(url, custom_user_agent=None):
     }
     try:
         response = requests.get(url,headers=headers,timeout=5000)
-        if response.status_code==200:
-            return response
-        else:
-            return None
-    except:
+        response.raise_for_status()
+        return response
+    except Exception as e:
+        print(str(e))
         return None
     
 class ConfigSSH:

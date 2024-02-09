@@ -1,0 +1,93 @@
+//- vim: set ts=2 sts=2 sw=2 et autoindent :
+
+-
+  var links = {
+    "pico.css": "https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css",
+    "tachyons.css": "https://unpkg.com/tachyons/css/tachyons.min.css",
+    "missing.css": "https://unpkg.com/missing.css@1.1.1",
+    "_hyperscript_w9y": "https://cdn.jsdelivr.net/gh/bigskysoftware/_hyperscript@0.9.5/dist/_hyperscript_w9y.min.js",
+    "_hyperscript": "https://unpkg.com/hyperscript.org@0.9.12",
+    "htmx_debug": "https://unpkg.com/browse/htmx.org@1.9.10/dist/htmx.min.js",
+    "htmx": "https://unpkg.com/htmx.org@1.9.10",
+  };
+
+  var stylesheets = [ links["pico.css"] ];
+  var scripts = [ links["_hyperscript_w9y"], links["htmx"] ];
+
+html(lang="en")
+  head
+
+    meta(charset='UTF-8')
+
+    title 生成sing-box配置
+
+    link(rel='icon', href='https://raw.githubusercontent.com/Toperlock/sing-box-subscribe/main/public/favicon.ico', type='image/x-icon')
+
+    each style in stylesheets
+      link(rel="stylesheet" href=style)
+
+    each source in scripts
+      script(type="text/javascript" src=source)
+
+
+    script(type="text/hyperscript").
+      def add_subscription(container)
+          set templ to #template.content.cloneNode(true)
+          set item to templ.querySelector('.templated')
+          put item at the end of container
+  body
+    .container
+      //
+        .left-box
+          h1 Providers
+          form#providers-form(method="POST" action="/update_providers")
+            textarea( name="providers_data" rows="10" cols="40" ) {{ providers_data | safe }}
+            
+      .right-box
+        h1 Edit TEMP_JSON_DATA
+        //- 
+          form#temp-json-form(method='POST', action='/edit_temp_json')
+            textarea(name='temp_json_data', rows='10', cols='40') {{ temp_json_data | default('') }}
+            input(type='submit', value='save')
+        .form-container
+          form
+            template#template
+              .templated
+                label URL
+                  input(type='text', name='URL[]', placeholder="https://first-url/:https://second-url/...")
+                label Prefix
+                  input(type='text', name='prefix[]' placeholder="❤️")
+                label Subgroup
+                  input(type='text', name='subgroup[]', placeholder="named")
+                label User-Agent
+                  input(type='text', name='User-Agent[]', value="v2rayng")
+                .grid
+                  label Enable
+                    input(type="checkbox", name="enabled[]", checked=true)
+                  label Emojis
+                    input(type="checkbox", name="emojis[]")
+                  button.remove.secondary.outline(type="button") remove
+                hl
+            #subscriptions(_=`
+              init call add_subscription(me) end
+              on click if target matches .remove then tell closest <.templated/> to target remove yourself
+            `)
+            button.secondary(type="button", _="on click call add_subscription(#subscriptions)") +
+
+            select(name='template_index')
+              | {% for option in template_options %}
+              option(value='{{ loop.index - 1 }}') {{ option }}
+              | {% endfor %}
+
+            button(hx-post='/api2/edit_temp_json', hx-target='#config-text') Cache changes on server
+            button(hx-post='/api2/generate_config', hx-target='#config-text') Open generated config
+      .config-content
+        output#config-text
+      
+    | {% with messages = get_flashed_messages() %} {% if messages %}
+    ul.flashes
+      | {% for message in messages %}
+      li {{ message }}
+      | {% endfor %}
+    | {% endif %} {% endwith %}
+

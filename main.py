@@ -1,28 +1,180 @@
-import json, os, tool, time, requests, sys, urllib, importlib, argparse, yaml, ruamel.yaml
-import re
+import json, os, tool, time, requests, sys, urllib, importlib, yaml, ruamel.yaml
+import re, tempfile
+from typing import Optional, Tuple, List, Union, Callable, Any, Generator, Iterable, Iterator
+from typing_extensions import Literal
+from functools import cached_property
 from datetime import datetime
 from urllib.parse import urlparse
-from api.app import TEMP_DIR
+from pathlib import Path
 from parsers.clash2base64 import clash2v2ray
+from parsers import module_to_dict
+from pydantic import BaseModel, Field, AliasPath
 
-parsers_mod = {}
+
+parsers_mod = module_to_dict()
 providers = None
 color_code = [31, 32, 33, 34, 35, 36, 91, 92, 93, 94, 95, 96]
 
+Tag = str
+Url = str
+Node = dict[str, Any]
+NodeMultiMap = dict[Tag, list[Node]]
+StringTransform = Callable[[str], str]
+FilterAction = Literal['include', 'exclude']
+
+def filter_true(it: Iterable[Any]) -> Iterable[Any]:
+    return filter(lambda _:_, it)
+
+class Subscription(BaseModel):
+    url: Url
+    tag: Tag
+    enabled: bool = True
+    emoji: int = 0
+    subgroup: str = ''
+    prefix: str = ''
+    ua: str = Field(default='v2rayng', alias='User-Agent')
+
+class ASOD(BaseModel):
+    proxy: Tag = ''
+    direct: Tag = ''
+
+class ProvidersConfig(BaseModel):
+    subscribes: List[Subscription]
+    config_template: Url = ''
+    auto_set_outbounds_dns: ASOD = Field(default_factory=ASOD)
+    save_config_path: Path = Path('config.json')
+    auto_backup: bool = False
+    exclude_protocol: str = 'ssr'
+    only_nodes: bool = Field(default=False, alias='Only-Nodes')
+
+class SBLog(BaseModel):
+    level: str = "warning"
+    timestamp: bool = False
+class SBClashFile(BaseModel):
+    enabled: bool = False
+    store_fakeip: bool = False
+class SBClashAPI(BaseModel):
+    default_mode: str = 'rule'
+    external_controller: str = '127.0.0.1:9090'
+    external_ui: str = 'ui'
+    external_ui_download_detour: str = 'direct'
+    external_ui_download_url: Url = 'https://mirror.ghproxy.com/https://github.com/MetaCubeX/Yacd-meta/archive/gh-pages.zip'
+    secret: str = ''
+class SBExperimentalClashAPI(BaseModel):
+    clash_file: SBClashFile = Field(default_factory=SBClashFile)
+    clash_api: SBClashAPI = Field(default_factory=SBClashAPI)
+class SBExperimental(BaseModel):
+    experimental: SBExperimentalClashAPI = Field(default_factory=SBExperimentalClashAPI)
+
+SBDnsRule = dict
+example = [{'domain': ['ghproxy.com',
+                       'cdn.jsdelivr.net',
+                       'testingcf.jsdelivr.net'],
+            'server': 'localDns'},
+           {'rule_set': 'geosite-category-ads-all', 'server': 'block'},
+           {'disable_cache': True,
+            'outbound': 'any',
+            'server': 'localDns'},
+           {'rule_set': 'geosite-cn', 'server': 'localDns'},
+           {'clash_mode': 'direct', 'server': 'localDns'},
+           {'clash_mode': 'global', 'server': 'proxyDns'},
+           {'rule_set': 'geosite-geolocation-!cn',
+            'server': 'proxyDns'}]
+class SBDnsServer(BaseModel):
+    tag: Tag
+    address: Url
+    detour: Optional[Tag] = None
+class SBDns(BaseModel):
+    strategy: str = 'auto'
+    final: Tag
+    rules: list[SBDnsRule]
+    servers: list[SBDnsServer]
+SBInbound = dict[str, Any]
+
+class SBOutboundFilter(BaseModel):
+    for_: list[Tag] = Field(default_factory=list, alias='for')
+    action: FilterAction = 'include'
+    keywords: Optional[list[str]] = None
+
+    @cached_property
+    def pattern(self, /) -> Optional[re.Pattern]:
+        good_keywords = filter_true(map(str.strip, keywords))
+        query = '|'.join(good_keywords)
+        if not query:
+            return
+        return re.compile(query)
+
+    def apply_on(self, tags: Iterable[Tag]) -> Iterable[Tag]:
+        invert = (action == 'exclude')
+        return filter(lambda x: invert ^ bool(self.pattern.search(x)), tags)
+
+class SBOutbound(BaseModel):
+    outbounds: Union[None,Tag,list[Tag]] = None
+    tag: Tag
+    type: str
+    default: Optional[Tag] = None
+    filter: Optional[list[SBOutboundFilter]] = None
+    
+class SBRuleSetExemplar(BaseModel):
+    download_detour: Tag = 'direct'
+    format: str = 'binary'
+    tag: Optional[Tag] = None
+    type: str = 'remote'
+    url: Url
+
+Domain = Url
+class SBRouteRule(BaseModel):
+    outbound: Tag
+    network: Optional[str] = None
+    protocol: Optional[str] = None
+    port: Optional[int] = None
+    rule_set: Optional[Union[Tag, list[Tag]]] = None
+    clash_mode: Optional[str] = None
+    domain: Optional[list[Domain]] = None
+
+
+class SBRoute(BaseModel):
+    auto_detect_interface: bool = False
+    final: Optional[Tag] = None
+    rule_set: Optional[list[SBRuleSetExemplar]] = None
+    rules: list[SBRouteRule]
+
+
+class SingBoxConfig(BaseModel):
+    log: SBLog = Field(default_factory=SBLog)
+    experimental: SBExperimental = Field(default_factory=SBExperimental)
+    dns: SBDns = Field(default_factory=SBDns)
+    route: SBRoute = Field(default_factory=SBRoute)
+    inbounds: list[SBInbound]
+    outbounds: list[SBOutbound]
+
+default_settings = ProvidersConfig.model_validate({
+    "subscribes":[
+        {
+            "url": "Please, fill in URL",
+            "tag": "tag_1",
+            "enabled": True,
+            "emoji": 1,
+            "subgroup": "",
+            "prefix": "",
+            "User-Agent":"v2rayng"
+        },
+        {
+            "url": "URL",
+            "tag": "tag_2",
+            "enabled": False,
+            "emoji": 0,
+            "subgroup": "命名/named",
+            "prefix": "❤️",
+            "User-Agent":"clashmeta"
+        }
+    ]
+})
 
 def loop_color(text):
-    text = '\033[1;{color}m{text}\033[0m'.format(color=color_code[0], text=text)
+    text = '{color}m{text}'.format(color=color_code[0], text=text)
     color_code.append(color_code.pop(0))
     return text
-
-
-def init_parsers():
-    b = os.walk('parsers')
-    for path, dirs, files in b:
-        for file in files:
-            f = os.path.splitext(file)
-            if f[1] == '.py':
-                parsers_mod[f[0]] = importlib.import_module('parsers.' + f[0])
 
 
 def get_template():
@@ -34,166 +186,115 @@ def get_template():
     return template_list
 
 
-def load_json(path):
-    return json.loads(tool.readFile(path))
-
-
-def process_subscribes(subscribes):
+def process_subscribes(subscribes: list[Subscription]) -> dict[Tag, list[Node]]:
     nodes = {}
     for subscribe in subscribes:
-        if 'enabled' in subscribe and not subscribe['enabled']:
+        if not subscribe.enabled:
             continue
-        if 'sing-box-subscribe.vercel.app' in subscribe['url']:
+        if 'sing-box-subscribe.vercel.app' in subscribe.url:
             continue
-        _nodes = get_nodes(subscribe['url'])
-        if _nodes and len(_nodes) > 0:
-            add_prefix(_nodes, subscribe)
-            add_emoji(_nodes, subscribe)
-            if subscribe.get('subgroup'):
-                subscribe['tag'] = subscribe['tag'] + '-' + subscribe['subgroup'] + '-' + 'subgroup'
-            if not nodes.get(subscribe['tag']):
-                nodes[subscribe['tag']] = []
-            nodes[subscribe['tag']] += _nodes
-        else:
-            print('没有在此订阅下找到节点，跳过')
+        _nodes: list[Node] = get_nodes(subscribe.url)
+        if not _nodes:
+            print("No urls found in subscription, skipping")
+            # print('没有在此订阅下找到节点，跳过')
             # print('Không tìm thấy proxy trong link thuê bao này, bỏ qua')
+            continue
+        prefix = subscribe.prefix
+        if prefix:
+            rename_nodes(_nodes, lambda x: prefix + x)
+        if subscribe.emoji:
+            rename_nodes(_nodes, tool.rename)
+        if subscribe.subgroup:
+            subscribe.tag = subscribe.tag + '-' + subscribe.subgroup + '-' + 'subgroup'
+        if not nodes.get(subscribe.tag):
+            nodes[subscribe.tag] = []
+        nodes[subscribe.tag] += _nodes
     tool.proDuplicateNodeName(nodes)
     return nodes
 
 
-def nodes_filter(nodes, filter, group):
-    for a in filter:
-        if a.get('for') and group not in a['for']:
-            continue
-        nodes = action_keywords(nodes, a['action'], a['keywords'])
-    return nodes
-
-
-def action_keywords(nodes, action, keywords):
-    # filter将按顺序依次执行
-    # "filter":[
-    #         {"action":"include","keywords":[""]},
-    #         {"action":"exclude","keywords":[""]}
-    #     ]
-    temp_nodes = []
-    flag = False
-    if action == 'exclude':
-        flag = True
-    '''
-    # 空关键字过滤
-    '''
-    # Join the patterns list into a single pattern, separated by '|'
-    combined_pattern = '|'.join(keywords)
-
-    # If the combined pattern is empty or only contains whitespace, return the original nodes
-    if not combined_pattern or combined_pattern.isspace():
-        return nodes
-
-    # Compile the combined regex pattern
-    compiled_pattern = re.compile(combined_pattern)
-
+def rename_nodes(nodes: list[dict], rule: Callable[[str], str]) -> None:
     for node in nodes:
-        name = node['tag']
-        # Use regex to check for a match
-        match_flag = bool(compiled_pattern.search(name))
-
-        # Use XOR to decide if the node should be included based on the action
-        if match_flag ^ flag:
-            temp_nodes.append(node)
-
-    return temp_nodes
+        node['tag'] = rule(node['tag'])
+        if node.get('detour'):
+            node['detour'] = rule(node['detour'])
 
 
-def add_prefix(nodes, subscribe):
-    if subscribe.get('prefix'):
-        for node in nodes:
-            node['tag'] = subscribe['prefix'] + node['tag']
-            if node.get('detour'):
-                node['detour'] = subscribe['prefix'] + node['detour']
-
-
-def add_emoji(nodes, subscribe):
-    if subscribe.get('emoji'):
-        for node in nodes:
-            node['tag'] = tool.rename(node['tag'])
-            if node.get('detour'):
-                node['detour'] = tool.rename(node['detour'])
-
-
-def get_nodes(url):
+def get_nodes(url: Url) -> list[Node]:
     if url.startswith('sub://'):
         url = tool.b64Decode(url[6:]).decode('utf-8')
     urlstr = urlparse(url)
-    if not urlstr.scheme:
+
+    if urlstr.scheme:
+        content = get_content_from_url(url)
+    else:
         try:
             content = tool.b64Decode(url).decode('utf-8')
-            data = parse_content(content)
-            processed_list = []
-            for item in data:
-                if isinstance(item, tuple):
-                    processed_list.extend([item[0], item[1]])  # 处理shadowtls
-                else:
-                    processed_list.append(item)
-            return processed_list
+            return process_content(content)
         except:
             content = get_content_form_file(url)
-    else:
-        content = get_content_from_url(url)
     # print (content)
-    if type(content) == dict:
-        if 'proxies' in content:
-            share_links = []
-            for proxy in content['proxies']:
-                share_links.append(clash2v2ray(proxy))
-            data = '\n'.join(share_links)
-            data = parse_content(data)
-            processed_list = []
-            for item in data:
-                if isinstance(item, tuple):
-                    processed_list.extend([item[0], item[1]])  # 处理shadowtls
-                else:
-                    processed_list.append(item)
-            return processed_list
-        elif 'outbounds' in content:
-            outbounds = []
-            excluded_types = {"selector", "urltest", "direct", "block", "dns"}
-            filtered_outbounds = [outbound for outbound in content['outbounds'] if outbound.get("type") not in excluded_types]
-            outbounds.extend(filtered_outbounds)
-            return outbounds
-    else:
-        data = parse_content(content)
-        processed_list = []
-        for item in data:
-            if isinstance(item, tuple):
-                processed_list.extend([item[0], item[1]])  # 处理shadowtls
-            else:
-                processed_list.append(item)
-        return processed_list
+    if type(content) != dict: 
+        #? assert type(content) == str
+        return process_content(content)
+
+    assert type(content) == dict
+    if 'proxies' in content:
+        share_links = []
+        for proxy in content['proxies']:
+            share_links.append(clash2v2ray(proxy))
+        data = '\n'.join(share_links)
+        return process_content(data)
+    elif 'outbounds' in content:
+        outbounds = []
+        excluded_types = {"selector", "urltest", "direct", "block", "dns"}
+        filtered_outbounds = [outbound for outbound in content['outbounds'] if outbound.get("type") not in excluded_types]
+        outbounds.extend(filtered_outbounds)
+        return outbounds
+    assert False, "We reached something that should not be reachable"
+    return []
 
 
-def parse_content(content):
+def process_content(content: str) -> list[Node]:
     # firstline = tool.firstLine(content)
     # # print(firstline)
     # if not get_parser(firstline):
     #     return None
     nodelist = []
-    for t in content.splitlines():
-        t = t.strip()
-        if len(t) == 0:
-            continue
-        factory = get_parser(t)
-        if not factory:
-            continue
-        node = factory(t)
-        if node:
-            nodelist.append(node)
+    for url in content.splitlines():
+        nodelist.extend(nodes_generator(url))
     return nodelist
 
 
-def get_parser(node):
+def nodes_generator(url: Url) -> Generator[Node, None, None]:
+    url = url.strip()
+    if not url:
+        return
+    factory = get_parser(url)
+    if not factory:
+        return
+    node = factory(url)
+    if not node:
+        return
+    if isinstance(node, tuple):
+        # 处理shadowtls
+        yield node[0]
+        yield node[1]
+    else:
+        yield node
+
+
+def get_parser(node: Url) -> "function":
+    """
+    get node specification (Url encoded)
+    return function for parsing it 
+
+    def parse(url: Url) -> Optional[Node]:
+        return ...
+    """
     proto = tool.get_protocol(node)
-    if providers.get('exclude_protocol'):
-        eps = providers['exclude_protocol'].split(',')
+    if providers.exclude_protocol:
+        eps = providers.exclude_protocol.split(',')
         if len(eps) > 0:
             eps = [protocol.strip() for protocol in eps]
             if proto in eps:
@@ -203,24 +304,26 @@ def get_parser(node):
     return parsers_mod[proto].parse
 
 
-def get_content_from_url(url, n=6):
+def get_content_from_url(url: Url, n: int = 6) -> list[Url]:
     UA = ''
-    print('处理: \033[31m' + url + '\033[0m')
-    # print('Đang tải link đăng ký: \033[31m' + url + '\033[0m')
+    print('处理: ' + url)
+    # print('Đang tải link đăng ký: ' + url + '')
     prefixes = ["vmess://", "vless://", "ss://", "ssr://", "trojan://", "tuic://", "hysteria://", "hysteria2://",
                 "hy2://", "wg://", "http2://", "socks://", "socks5://"]
     if any(url.startswith(prefix) for prefix in prefixes):
-        response_text = tool.noblankLine(url)
-        return response_text
+        return list(filter_true(map(str.strip, url.splitlines())))
+    '''
     for subscribe in providers["subscribes"]:
         if 'enabled' in subscribe and not subscribe['enabled']:
             continue
         if subscribe['url'] == url:
             UA = subscribe.get('User-Agent', '')
     response = tool.getResponse(url, custom_user_agent=UA)
+    '''
+    response = tool.getResponse(url)
     concount = 1
     while concount <= n and not response:
-        print('连接出错，正在进行第 ' + str(concount) + ' 次重试，最多重试 ' + str(n) + ' 次...')
+        print(f'连接出错，正在进行第 {concount} 次重试，最多重试 {n} 次...')
         # print('Lỗi kết nối, đang thử lại '+str(concount)+'/'+str(n)+'...')
         response = tool.getResponse(url)
         concount = concount + 1
@@ -229,7 +332,7 @@ def get_content_from_url(url, n=6):
         print('获取错误，跳过此订阅')
         # print('Lỗi khi tải link đăng ký, bỏ qua link đăng ký này')
         print('----------------------------')
-        pass
+        return []
     response_content = response.content
     response_text = response_content.decode('utf-8-sig')  # utf-8-sig 可以忽略 BOM
     #response_encoding = response.encoding
@@ -240,6 +343,7 @@ def get_content_from_url(url, n=6):
     if not response_text:
         response = tool.getResponse(url, custom_user_agent='clashmeta')
         response_text = response.text
+    assert isinstance(response_text, str)
     if any(response_text.startswith(prefix) for prefix in prefixes):
         response_text = tool.noblankLine(response_text)
         return response_text
@@ -268,221 +372,253 @@ def get_content_from_url(url, n=6):
     return response_text
 
 
-def get_content_form_file(url):
-    print('处理: \033[31m' + url + '\033[0m')
-    # print('Đang tải link đăng ký: \033[31m' + url + '\033[0m')
-    # encoding = tool.get_encoding(url)
-    file_extension = os.path.splitext(url)[1]  # 获取文件的后缀名
-    if file_extension.lower() == '.yaml':
-        with open(url, 'rb') as file:
-            content = file.read()
+def get_content_form_file(file: Path) -> list[Url]:
+    print('处理: ' + file + '')
+    file = Path(file)
+    # print('Đang tải link đăng ký: ' + file + '')
+    # encoding = tool.get_encoding(file)
+    file_extension = file.suffix.lower()
+    if file_extension == '.yaml':
+        content = file.read_text()
         yaml_data = dict(yaml.safe_load(content))
         share_links = []
         for proxy in yaml_data['proxies']:
             share_links.append(clash2v2ray(proxy))
-        node = '\n'.join(share_links)
-        processed_list = tool.noblankLine(node)
-        return processed_list
+        node = list(link.strip() for link in share_links if link)
+        return node
     else:
-        data = tool.readFile(url)
-        data = bytes.decode(data, encoding='utf-8')
-        data = tool.noblankLine(data)
-        return data
+        data = file.read_text(encoding='utf-8')
+        clean_lines = map(str.strip, data.split())
+        nonempty_lines = filter_true(clean_lines)
+        return list(nonempty_lines)
 
 
-def save_config(path, nodes):
-    try:
-        if 'auto_backup' in providers and providers['auto_backup']:
-            now = datetime.now().strftime('%Y%m%d%H%M%S')
-            if os.path.exists(path):
-                os.rename(path, f'{path}.{now}.bak')
-        if os.path.exists(path):
-            os.remove(path)
-            print(f"已删除文件，并重新保存：\033[33m{path}\033[0m")
-            # print(f"File cấu hình đã được lưu vào: \033[33m{path}\033[0m")
-        else:
-            print(f"文件不存在，正在保存：\033[33m{path}\033[0m")
-            # print(f"File không tồn tại, đang lưu tại: \033[33m{path}\033[0m")
-        tool.saveFile(path, json.dumps(nodes, indent=2, ensure_ascii=False))
-    except Exception as e:
-        print(f"保存配置文件时出错：{str(e)}")
-        # print(f"Lỗi khi lưu file cấu hình: {str(e)}")
-        # 如果保存出错，尝试使用 config_file_path 再次保存
-        config_path = json.loads(temp_json_data).get("save_config_path", "config.json")
-        CONFIG_FILE_NAME = config_path
-        config_file_path = os.path.join('/tmp', CONFIG_FILE_NAME)
-        try:
-            if os.path.exists(config_file_path):
-                os.remove(config_file_path)
-                print(f"已删除文件，并重新保存：\033[33m{config_file_path}\033[0m")
-                # print(f"File cấu hình đã được lưu vào: \033[33m{config_file_path}\033[0m")
-            else:
-                print(f"文件不存在，正在保存：\033[33m{config_file_path}\033[0m")
-                # print(f"File không tồn tại, đang lưu tại: \033[33m{config_file_path}\033[0m")
-            tool.saveFile(config_file_path, json.dumps(nodes, indent=2, ensure_ascii=False))
-            # print(f"配置文件已保存到 {config_file_path}")
-            # print(f"Tập tin cấu hình đã được lưu vào {config_file_path}")
-        except Exception as e:
-            os.remove(config_file_path)
-            print(f"已删除文件：\033[33m{config_file_path}\033[0m")
-            # print(f"Các file đã bị xóa: \033[33m{config_file_path}\033[0m")
-            print(f"再次保存配置文件时出错：{str(e)}")
-            # print(f"Lỗi khi lưu lại file cấu hình: {str(e)}")
+def try_save_file(path: Path, content: str) -> bool:
+    if path.exists():
+        path.unlink()
+        print(f"已删除文件，并重新保存：m{path}")
+    else:
+        print(f"文件不存在，正在保存：m{path}")
+    path.write_text(content, encoding='utf-8')
 
 
-def set_proxy_rule_dns(config):
+def save_config(path: Path, config: SingBoxConfig) -> None:
+    tmp = Path(tempfile.gettempdir())
+    if providers.auto_backup:
+        now = datetime.now().strftime('%Y%m%d%H%M%S')
+        if path.exists():
+            backup = tmp / f'{path.name}.{now}.bak'
+            path.replace(target)
+    content = config.model_dump_json(indent=2, exclude_none=True)
+    try_save_file(path, content)
+
+
+def set_proxy_rule_dns(config: SingBoxConfig):
     # dns_template = {
     #     "tag": "remote",
     #     "address": "tls://1.1.1.1",
     #     "detour": ""
     # }
-    config_rules = config['route']['rules']
+    dns_tags = set( server.tag for server in config.dns.servers )
+    asod = providers.auto_set_outbounds_dns
+    if not set(dns_tags).issuperset(set((asod.proxy, asod.direct))):
+        return
+    config_rules = config.route.rules
     outbound_dns = []
-    dns_rules = config['dns']['rules']
-    asod = providers["auto_set_outbounds_dns"]
+    dns_rules = config.dns.rules
     for rule in config_rules:
-        if rule['outbound'] not in ['block', 'dns-out']:
-            if rule['outbound'] != 'direct':
-                outbounds_dns_template = \
-                    list(filter(lambda server: server['tag'] == asod["proxy"], config['dns']['servers']))[0]
-                dns_obj = outbounds_dns_template.copy()
-                dns_obj['tag'] = rule['outbound'] + '_dns'
-                dns_obj['detour'] = rule['outbound']
-                if dns_obj not in outbound_dns:
-                    outbound_dns.append(dns_obj)
-            if rule.get('type') and rule['type'] == 'logical':
-                dns_rule_obj = {
-                    'type': 'logical',
-                    'mode': rule['mode'],
-                    'rules': [],
-                    'server': rule['outbound'] + '_dns' if rule['outbound'] != 'direct' else asod["direct"]
-                }
-                for _rule in rule['rules']:
-                    child_rule = pro_dns_from_route_rules(_rule)
-                    if child_rule:
-                        dns_rule_obj['rules'].append(child_rule)
-                if len(dns_rule_obj['rules']) == 0:
-                    dns_rule_obj = None
+        if rule.outbound in ['block', 'dns-out']:
+            continue
+        if rule.outbound != 'direct':
+            outbounds_dns_template = \
+                list(filter(lambda server: server.tag == asod.proxy, config.dns.servers))[0]
+            dns_obj = outbounds_dns_template.copy()
+            dns_obj.tag = rule.outbound + '_dns'
+            dns_obj.detour = rule.outbound
+            if dns_obj not in outbound_dns:
+                outbound_dns.append(dns_obj)
+        if rule.type == 'logical':
+            dns_rule_obj = {
+                'type': 'logical',
+                'mode': rule.mode,
+                'rules': [],
+                'server': rule.outbound + '_dns' if rule.outbound != 'direct' else asod.direct
+            }
+            def gen(x):
+                for _rule in x:
+                    r = pro_dns_from_route_rules(_rule)
+                    if r:
+                        yield r
+            dns_rule_obj_rules = list(gen(rule.rules))
+            if dns_rule_obj_rules:
+                dns_rule_obj.rules = dns_rule_obj_rules
             else:
-                dns_rule_obj = pro_dns_from_route_rules(rule)
-            if dns_rule_obj:
-                dns_rules.append(dns_rule_obj)
+                dns_rule_obj = None
+        else:
+            dns_rule_obj = pro_dns_from_route_rules(rule)
+        if dns_rule_obj:
+            dns_rules.append(dns_rule_obj)
     # 清除重复规则
     _dns_rules = []
     for dr in dns_rules:
         if dr not in _dns_rules:
             _dns_rules.append(dr)
-    config['dns']['rules'] = _dns_rules
-    config['dns']['servers'].extend(outbound_dns)
+    config.dns.rules = _dns_rules
+    config.dns.servers.extend(outbound_dns)
 
 
-def pro_dns_from_route_rules(route_rule):
+def pro_dns_from_route_rules(route_rule: dict) -> dict:
     dns_route_same_list = ["inbound", "ip_version", "network", "protocol", 'domain', 'domain_suffix', 'domain_keyword',
                            'domain_regex', 'geosite', "source_geoip", "source_ip_cidr", "source_port",
                            "source_port_range", "port", "port_range", "process_name", "process_path", "package_name",
                            "user", "user_id", "clash_mode", "invert"]
-    dns_rule_obj = {}
-    for key in route_rule:
-        if key in dns_route_same_list:
-            dns_rule_obj[key] = route_rule[key]
+    dns_rule_obj = { k: v for k, v in route_rule.items() if k in dns_route_same_list }
     if len(dns_rule_obj) == 0:
         return None
-    if route_rule.get('outbound'):
-        dns_rule_obj['server'] = route_rule['outbound'] + '_dns' if route_rule['outbound'] != 'direct' else \
-            providers["auto_set_outbounds_dns"]['direct']
+    if route_rule.outbound:
+        dns_rule_obj.server = route_rule.outbound + '_dns' if route_rule.outbound != 'direct' else \
+            providers.auto_set_outbounds_dns.direct
     return dns_rule_obj
 
 
-def pro_node_template(data_nodes, config_outbound, group):
-    if config_outbound.get('filter'):
-        data_nodes = nodes_filter(data_nodes, config_outbound['filter'], group)
-    return [node.get('tag') for node in data_nodes]
+def action_keywords(tags: Iterable[Tag], action: FilterAction, keywords: list[str]) -> Iterable[Tag]:
+    # filter将按顺序依次执行
+    # "filter":[
+    #         {"action":"include","keywords":[""]},
+    #         {"action":"exclude","keywords":[""]}
+    #     ]
+    '''
+    # 空关键字过滤
+    '''
+    # Join the patterns list into a single pattern, separated by '|'
+    good_keywords = filter_true(map(str.strip, keywords))
+    query = '|'.join(good_keywords)
+
+    # If the combined pattern is empty or only contains whitespace, return the original tags
+    if not query:
+        return tags
+
+    # Compile the combined regex pattern
+    pattern = re.compile(query)
+
+    invert = (action == 'exclude')
+    return filter(lambda x: invert ^ bool(pattern.search(x)), tags)
+
+def pro_tag_template(tags: Iterable[Tag], config_outbound: SBOutbound, group_tag: Tag) -> Iterable[Tag]:
+    for f in config_outbound.filter or []:
+        if group_tag not in f.for_:
+            continue
+        tags = f.apply_on(tags)
+    return tags
+
+def pro_node_template(nodes: Iterable[Node], config_outbound: SBOutbound, group_tag: Tag) -> Iterable[Tag]:
+    tags = (node['tag'] for node in nodes)
+    return pro_tag_template(tags, config_outbound, group_tag)
+
+def is_outbound_group(item: str) -> bool:
+    return item.startswith('{') and item.endswith('}')
+
+def strip_brakets(item: str) -> str:
+    if is_outbound_group(item):
+        return item[1:-1]
+    return item
+
+def tag_from_group(group: str) -> str:
+    # return (group.rsplit("-", 1)[0]).rsplit("-", 1)[-1]
+    return group.rsplit("-", 2)[-2]
+
+def gen_temp_outbounds(data: NodeMultiMap, config_outbounds: list[SBOutbound]) -> None:
+    if not config_outbounds:
+        return
+
+    # 提前处理all模板
+    for out in config_outbounds:
+        # 处理出站
+        if not out.outbounds:
+            continue
+
+        if '{all}' in out.outbounds:
+            o1 = []
+            for item in out.outbounds:
+                if item != '{all}':
+                    o1.append(strip_brakets(item))
+            out.outbounds = o1
+
+        t_o = gen_single_temp_outbound(data, out)
+
+        if len(t_o) == 0:
+            message = '发现 {} 出站下的节点数量为 0 ，会导致sing-box无法运行，请检查config模板是否正确。'
+            raise RuntimeError(message.format(out.tag))
+
+        out.outbounds = t_o
+        out.filter = None
 
 
-def combin_to_config(config, data):
-    config_outbounds = config["outbounds"] if config.get("outbounds") else None
-    i = 0
+def gen_single_temp_outbound(data: NodeMultiMap, sb_outbound: SBOutbound):
+    retval = []
+    check_dup = []
+    for otag in sb_outbound.outbounds:
+        # 避免添加重复节点
+        if otag in check_dup:
+            continue
+        check_dup.append(otag)
+
+        # 处理模板
+        if not is_outbound_group(otag):
+            retval.append(otag)
+            continue
+
+        otag = otag[1:-1]
+
+        if data.get(otag):
+            nodes = data[otag]
+            retval.extend(pro_node_template(nodes, sb_outbound, otag))
+            continue
+        
+        if otag != 'all':
+            continue
+
+        for group, nodes in data.items():
+            retval.extend(pro_node_template(nodes, sb_outbound, group))
+
+    return retval
+
+
+def combin_to_config(config: SingBoxConfig, data: NodeMultiMap) -> SingBoxConfig:
+    config_outbounds = config.outbounds
+    subgroups_counter = 0
     for group in data:
         if 'subgroup' in group:
-            i += 1
-            for out in config_outbounds:
-                if out.get("outbounds"):
-                    if out['tag'] == 'proxy':
-                        out["outbounds"] = [out["outbounds"]] if isinstance(out["outbounds"], str) else out["outbounds"]
-                        if '{all}' in out["outbounds"]:
-                            index_of_all = out["outbounds"].index('{all}')
-                            out["outbounds"][index_of_all] = (group.rsplit("-", 1)[0]).rsplit("-", 1)[-1]
-                            i += 1
-                        else:
-                            out["outbounds"].insert(i, (group.rsplit("-", 1)[0]).rsplit("-", 1)[-1])
-            new_outbound = {'tag': (group.rsplit("-", 1)[0]).rsplit("-", 1)[-1], 'type': 'selector', 'outbounds': ['{' + group + '}']}
+            subgroups_counter += 1
+
+        for out in config_outbounds:
+            if not out.outbounds:
+                continue
+            if out.tag == 'proxy':
+                continue
+            out.outbounds = [out.outbounds] if isinstance(out.outbounds, Tag) else out.outbounds
+
+            if 'subgroup' not in group:
+                out.outbounds.append('{' + group + '}')
+            elif '{all}' not in out.outbounds:
+                out.outbounds.insert(subgroups_counter, tag_from_group(group))
+            else:
+                index_of_all = out.outbounds.index('{all}')
+                out.outbounds[index_of_all] = tag_from_group(group)
+                subgroups_counter += 1
+
+        if 'subgroup' in group:
+            new_outbound = {'tag': tag_from_group(group), 'type': 'selector', 'outbounds': ['{' + group + '}']}
             config_outbounds.insert(-4, new_outbound)
-        else:
-            for out in config_outbounds:
-                if out.get("outbounds"):
-                    if out['tag'] == 'proxy':
-                        out["outbounds"] = [out["outbounds"]] if isinstance(out["outbounds"], str) else out["outbounds"]
-                        out["outbounds"].append('{' + group + '}')
+
     temp_outbounds = []
-    if config_outbounds:
-        # 提前处理all模板
-        for po in config_outbounds:
-            # 处理出站
-            if po.get("outbounds"):
-                if '{all}' in po["outbounds"]:
-                    o1 = []
-                    for item in po["outbounds"]:
-                        if item.startswith('{') and item.endswith('}'):
-                            _item = item[1:-1]
-                            if _item == 'all':
-                                o1.append(item)
-                        else:
-                            o1.append(item)
-                    po['outbounds'] = o1
-                t_o = []
-                check_dup = []
-                for oo in po["outbounds"]:
-                    # 避免添加重复节点
-                    if oo in check_dup:
-                        continue
-                    else:
-                        check_dup.append(oo)
-                    # 处理模板
-                    if oo.startswith('{') and oo.endswith('}'):
-                        oo = oo[1:-1]
-                        if data.get(oo):
-                            nodes = data[oo]
-                            t_o.extend(pro_node_template(nodes, po, oo))
-                        else:
-                            if oo == 'all':
-                                for group in data:
-                                    nodes = data[group]
-                                    t_o.extend(pro_node_template(nodes, po, group))
-                    else:
-                        t_o.append(oo)
-                if len(t_o) == 0:
-                    print('发现 {} 出站下的节点数量为 0 ，会导致sing-box无法运行，请检查config模板是否正确。'.format(
-                        po['tag']))
-                    # print('Sing-Box không chạy được vì không tìm thấy bất kỳ proxy nào trong outbound của {}. Vui lòng kiểm tra xem mẫu cấu hình có đúng không!!'.format(po['tag']))
-                    config_path = json.loads(temp_json_data).get("save_config_path", "config.json")
-                    CONFIG_FILE_NAME = config_path
-                    config_file_path = os.path.join('/tmp', CONFIG_FILE_NAME)
-                    if os.path.exists(config_file_path):
-                        os.remove(config_file_path)
-                        print(f"已删除文件：{config_file_path}")
-                        # print(f"Các tập tin đã bị xóa: {config_file_path}")
-                    sys.exit()
-                po['outbounds'] = t_o
-                if po.get('filter'):
-                    del po['filter']
+    gen_temp_outbounds(data, config_outbounds)
     for group in data:
         temp_outbounds.extend(data[group])
-    config['outbounds'] = config_outbounds + temp_outbounds
+
+    config.outbounds = config_outbounds + temp_outbounds
     # 自动配置路由规则到dns规则，避免dns泄露
-    dns_tags = [server.get('tag') for server in config['dns']['servers']]
-    asod = providers.get("auto_set_outbounds_dns")
-    if asod and asod.get('proxy') and asod.get('direct') and asod['proxy'] in dns_tags and asod['direct'] in dns_tags:
-        set_proxy_rule_dns(config)
+    set_proxy_rule_dns(config)
     return config
 
 
@@ -497,81 +633,102 @@ def updateLocalConfig(local_host, path):
 def display_template(tl):
     print_str = ''
     for i in range(len(tl)):
-        print_str += loop_color('{index}、{name} '.format(index=i + 1, name=tl[i]))
+        print_str += loop_color('{index}, {name} '.format(index=i + 1, name=tl[i]))
     print(print_str)
 
 
 def select_config_template(tl, selected_template_index=None):
-    if args.template_index is not None:
-        uip = args.template_index
-    else:
-        # print ('Nhập số để chọn mẫu cấu hình tương ứng (nhấn Enter để chọn mẫu cấu hình đầu tiên theo mặc định): ')
+    while True:
         uip = input('输入序号，载入对应config模板（直接回车默认选第一个配置模板）：')
+        if uip == '':
+            return 0
         try:
-            if uip == '':
-                return 0
             uip = int(uip)
-            if uip < 1 or uip > len(tl):
-                print('输入了错误信息！重新输入')
-                # print('Nhập thông tin không chính xác! Vui lòng nhập lại')
-                return select_config_template(tl)
-            else:
-                uip -= 1
         except:
-            print('输入了错误信息！重新输入')
-            # print('Nhập thông tin không chính xác! Vui lòng nhập lại')
-            return select_config_template(tl)
-    return uip
+            continue
+        if 1 <= uip <= len(lt):
+            return uip - 1
+        print('输入了错误信息！重新输入')
 
 
-# 自定义函数，用于解析参数为 JSON 格式
-def parse_json(value):
+def main_convert(providers: ProvidersConfig, config: SingBoxConfig) -> SingBoxConfig:
+    nodes: dict[Tag, list[Node]] = process_subscribes(providers.subscribes)
+
+    if not providers.only_nodes:
+        return combin_to_config(config, nodes)  # 节点信息添加到模板
+
+    combined_contents = []
+    for sub_tag, contents in nodes.items():
+        # 遍历每个机场的内容
+        for content in contents:
+            # 将内容添加到新列表中
+            combined_contents.append(content)
+    return combined_contents  # 只返回节点信息
+    # updateLocalConfig('http://127.0.0.1:9090',providers['save_config_path'])
+
+
+def get_config_from_url(url: Url) -> dict:
+    print('选择: ' + url + '')
+    response = requests.get(url)
+    response.raise_for_status()
+    return response.json()
+
+
+def get_config_from_file(templates: list[dict], index: int):
+    display_template(templates)
+    config_template_path = 'config_template/' + templates[index] + '.json'
+    print('选择: ' + templates[index] + '.json')
+    return SingBoxConfig.model_validate_json(tool.readFile(config_template_path))
+
+
+def main(providers_string: str, template_index: int) -> int:
+    global providers
+    if not providers_string:
+        providers_file = Path('providers.json')
+        if not providers_file.is_file():
+            print("provide --temp_json_data or populate providers.json")
+            return 1
+        providers_string = providers_file.read_text()
+
     try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        raise argparse.ArgumentTypeError(f"Invalid JSON: {value}")
+        providers = ProvidersConfig.model_validate_json(providers_string) 
+    except ValueError as e:
+        print("Providers config could not be parsed")
+        print(str(e))
+        return 2
 
+    config_src = providers.config_template
 
-if __name__ == '__main__':
-    init_parsers()
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--temp_json_data', type=parse_json, help='临时内容')
-    parser.add_argument('--template_index', type=int, help='模板序号')
-    args = parser.parse_args()
-    temp_json_data = args.temp_json_data
-    if temp_json_data and temp_json_data != '{}':
-        providers = json.loads(temp_json_data)
-    else:
-        providers = load_json('providers.json')  # 加载本地 providers.json
-    if providers.get('config_template'):
-        config_template_path = providers['config_template']
-        print('选择: \033[33m' + config_template_path + '\033[0m')
-        # print ('Mẫu cấu hình sử dụng: \033[33m' + template_list[uip] + '.json\033[0m')
-        response = requests.get(providers['config_template'])
-        response.raise_for_status()
-        config = response.json()
+    if config_src:
+        config = get_config_from_url(config_src)
     else:
         template_list = get_template()
         if len(template_list) < 1:
             print('没有找到模板文件')
             # print('Không tìm thấy file mẫu')
-            sys.exit()
-        display_template(template_list)
-        uip = select_config_template(template_list, selected_template_index=args.template_index)
-        config_template_path = 'config_template/' + template_list[uip] + '.json'
-        print('选择: \033[33m' + template_list[uip] + '.json\033[0m')
-        # print ('Mẫu cấu hình sử dụng: \033[33m' + template_list[uip] + '.json\033[0m')
-        config = load_json(config_template_path)
-    nodes = process_subscribes(providers["subscribes"])
-    if providers.get('Only-nodes'):
-        combined_contents = []
-        for sub_tag, contents in nodes.items():
-            # 遍历每个机场的内容
-            for content in contents:
-                # 将内容添加到新列表中
-                combined_contents.append(content)
-        final_config = combined_contents  # 只返回节点信息
-    else:
-        final_config = combin_to_config(config, nodes)  # 节点信息添加到模板
-    save_config(providers["save_config_path"], final_config)
-    # updateLocalConfig('http://127.0.0.1:9090',providers['save_config_path'])
+            return 1
+        config = get_config_from_file(template_list, template_index)
+    print(config.model_dump_json(exclude_none=True, indent=2))
+    final_config = main_convert(providers, config)
+    path = Path(providers.save_config_path)
+    save_config(path, final_config)
+
+    return 0
+
+
+if __name__ == '__main__':
+    # 自定义函数，用于解析参数为 JSON 格式
+    def parse_json(value):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            raise argparse.ArgumentTypeError(f"Invalid JSON: {value}")
+
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--temp_json_data', type=str, help='临时内容')
+    parser.add_argument('--template_index', type=int, help='模板序号')
+    args = parser.parse_args()
+
+    sys.exit(main(args.temp_json_data, args.template_index))
+
